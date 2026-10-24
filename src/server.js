@@ -10,10 +10,29 @@ import supplierRoutes from "./routes/supplier.routes.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 const app = express();
+
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:3000")
+  .split(",")
+  .map((origin) => origin.trim());
+
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:3000" }));
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests without an Origin header, such as server-to-server requests.
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+  }),
+);
+
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
+
 app.get("/health", async (req, res) => {
   res.json({ status: "ok", service: "superleo-api" });
 });
