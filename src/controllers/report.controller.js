@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,7 +119,7 @@ function buildPdf(data) {
       .fontSize(10)
       .font("Helvetica")
       .text(
-        `Reporting period: ${displayDate(data.from)} - ${displayDate(data.to)}`,
+        `Reporting period: ${displayDate(data.from)} — ${displayDate(data.to)}`,
         64,
         186,
       );
@@ -237,7 +238,9 @@ export async function email(req, res, next) {
           },
         ],
       },
-      { idempotencyKey: `supplier-report/${supplierEmail}/${from}/${to}` },
+      {
+        idempotencyKey: `supplier-report/${supplierProfileId || supplierEmail}/${randomUUID()}`,
+      },
     );
     if (error) return res.status(502).json({ error: error.message });
     res.json({ data: { sent: true } });
