@@ -1,6 +1,16 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 import { Resend } from "resend";
 import { pool } from "../config/db.js";
+
+// Logo used in the PDF header. Put logo.png in an `assets` folder next to
+// `controllers` (src/assets/logo.png) or change the path below.
+// If the file is missing the PDF is still generated, just without the logo.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOGO_PATH = path.resolve(__dirname, "../assets/logo.png");
+const LOGO = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
 
 function range(req) {
   const from = String(req.query.from || new Date().toISOString().slice(0, 10));
@@ -57,45 +67,68 @@ function buildPdf(data) {
     doc.on("data", (chunk) => chunks.push(chunk));
     doc.on("error", reject);
     doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.rect(0, 0, 595, 110).fill("#17372d");
-    doc
-      .fillColor("#dceccd")
-      .fontSize(12)
-      .font("Helvetica-Bold")
-      .text("SUPERLEO", 46, 30);
-    doc.fillColor("#ffffff").fontSize(24).text("Dairy delivery report", 46, 52);
-    doc
-      .fillColor("#b7cabd")
-      .fontSize(9)
-      .text("Milk collection centre · dairy.superleo.co.ke", 46, 82);
+    // Top accent strip (the dark green now lives here and in the supplier banner)
+    doc.rect(0, 0, 595, 8).fill("#17372d");
+    doc.rect(0, 8, 595, 2).fill("#dceccd");
+
+    // Logo: top centre, directly on the page (no background colour)
+    if (LOGO) {
+      doc.image(LOGO, (595 - 150) / 2, 26, { width: 150 });
+    } else {
+      doc
+        .fillColor("#17372d")
+        .font("Helvetica-Bold")
+        .fontSize(20)
+        .text("SUPERLEO", 46, 38, { width: 503, align: "center" });
+    }
     doc
       .fillColor("#17372d")
+      .font("Helvetica-Bold")
+      .fontSize(16)
+      .text("Dairy delivery report", 46, 78, { width: 503, align: "center" });
+    doc
+      .fillColor("#829087")
+      .font("Helvetica")
+      .fontSize(9)
+      .text("Milk collection centre · dairy.superleo.co.ke", 46, 99, {
+        width: 503,
+        align: "center",
+      });
+    doc.moveTo(46, 118).lineTo(549, 118).lineWidth(0.75).stroke("#dce6dd");
+
+    // Supplier banner
+    doc.roundedRect(46, 128, 503, 80, 10).fill("#17372d");
+    doc
+      .fillColor("#ffffff")
       .fontSize(18)
       .font("Helvetica-Bold")
-      .text(data.supplier?.name || "All suppliers", 46, 142);
+      .text(data.supplier?.name || "All suppliers", 64, 142);
     if (data.supplier)
       doc
-        .fillColor("#5a9960")
+        .fillColor("#b7d99d")
         .fontSize(10)
         .font("Helvetica")
         .text(
           `Supplier code: ${data.supplier.code}   ·   ${data.supplier.email}`,
-          46,
-          166,
+          64,
+          168,
         );
     doc
-      .fillColor("#64766b")
+      .fillColor("#b7cabd")
       .fontSize(10)
+      .font("Helvetica")
       .text(
-        `Reporting period: ${displayDate(data.from)} — ${displayDate(data.to)}`,
-        46,
-        188,
+        `Reporting period: ${displayDate(data.from)} - ${displayDate(data.to)}`,
+        64,
+        186,
       );
+
     doc
       .roundedRect(46, 220, 160, 62, 8)
       .fill("#eef6eb")
       .fillColor("#5a9960")
       .fontSize(9)
+      .font("Helvetica")
       .text("TOTAL MILK", 60, 236)
       .fillColor("#17372d")
       .fontSize(20)
