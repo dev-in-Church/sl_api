@@ -119,7 +119,7 @@ function buildPdf(data) {
       .fontSize(10)
       .font("Helvetica")
       .text(
-        `Reporting period: ${displayDate(data.from)} — ${displayDate(data.to)}`,
+        `Reporting period: ${displayDate(data.from)} - ${displayDate(data.to)}`,
         64,
         186,
       );
