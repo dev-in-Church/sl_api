@@ -24,4 +24,31 @@ router.get("/overview", async (req, res, next) => {
     next(error);
   }
 });
+router.patch("/suppliers/:id", async (req, res, next) => {
+  try {
+    const { fullName, phone, address } = req.body;
+    const result = await pool.query(
+      "UPDATE supplier_profiles SET full_name = COALESCE($1, full_name), phone = $2, address = $3, updated_at = NOW() WHERE id = $4 RETURNING *",
+      [fullName || null, phone || null, address || null, req.params.id],
+    );
+    if (!result.rowCount)
+      return res.status(404).json({ error: "Supplier not found" });
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+router.delete("/suppliers/:id", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "UPDATE supplier_profiles SET is_active = FALSE, updated_at = NOW() WHERE id = $1 RETURNING id",
+      [req.params.id],
+    );
+    if (!result.rowCount)
+      return res.status(404).json({ error: "Supplier not found" });
+    res.json({ data: { deleted: true } });
+  } catch (error) {
+    next(error);
+  }
+});
 export default router;

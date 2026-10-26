@@ -7,6 +7,8 @@ import { checkDatabaseConnection, pool } from "./config/db.js";
 import authRoutes from "./routes/auth.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import supplierRoutes from "./routes/supplier.routes.js";
+import reportRoutes from "./routes/report.routes.js";
+import deliveryRoutes from "./routes/delivery.routes.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 const app = express();
@@ -39,6 +41,8 @@ app.get("/health", async (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/suppliers", supplierRoutes);
+app.use("/api/reports", reportRoutes);
+app.use("/api/deliveries", deliveryRoutes);
 app.use(errorHandler);
 
 const port = Number(process.env.PORT || 4000);

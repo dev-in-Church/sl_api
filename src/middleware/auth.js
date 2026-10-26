@@ -26,3 +26,6 @@ export function requireRoles(...roles) {
       ? next()
       : res.status(403).json({ error: "Insufficient permissions" });
 }
+
+// Backward-compatible singular alias for routes copied from older backend versions.
+export const requireRole = (...roles) => requireRoles(...roles);
