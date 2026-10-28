@@ -177,7 +177,7 @@ function buildPdf(data) {
           y + 8,
         )
         .text(`${Number(item.quantity_litres).toFixed(2)} L`, x[2] + 8, y + 8)
-        .text("SuperLeo centre", x[3] + 8, y + 8);
+        .text("SuperLeo Dairy", x[3] + 8, y + 8);
       y += 25;
     });
     doc
