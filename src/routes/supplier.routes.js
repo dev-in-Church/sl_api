@@ -4,6 +4,25 @@ import { requireAuth, requireRoles } from "../middleware/auth.js";
 
 const router = Router();
 router.use(requireAuth, requireRoles("supplier"));
+
+// Deactivated suppliers lose access to their data straight away, even if they
+// still hold a valid token.
+router.use(async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT is_active FROM supplier_profiles WHERE user_id = $1",
+      [req.user.id],
+    );
+    if (result.rows[0]?.is_active === false)
+      return res.status(403).json({
+        error: "This account has been deactivated. Please contact SuperLeo.",
+      });
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/profile", async (req, res, next) => {
   try {
     const result = await pool.query(

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { pool } from "../config/db.js";
 import { requireAuth, requireRoles } from "../middleware/auth.js";
 import {
   listDeliveries,
