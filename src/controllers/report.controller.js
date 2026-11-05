@@ -13,6 +13,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOGO_PATH = path.resolve(__dirname, "../assets/logo.png");
 const LOGO = fs.existsSync(LOGO_PATH) ? fs.readFileSync(LOGO_PATH) : null;
 
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const money = (n) =>
+  Number(n).toLocaleString("en-KE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+// Current price per litre, set from the manager dashboard (app_settings table).
+// Returns 0 if it has not been set yet.
+async function getPricePerLitre() {
+  try {
+    const result = await pool.query(
+      "SELECT value FROM app_settings WHERE key = 'price_per_litre'",
+    );
+    return Number(result.rows[0]?.value) || 0;
+  } catch (error) {
+    if (error.code === "42P01") return 0; // table not created yet
+    throw error;
+  }
+}
+
 function range(req) {
   const from = String(req.query.from || new Date().toISOString().slice(0, 10));
   const to = String(req.query.to || from);
@@ -44,20 +65,26 @@ async function rows(from, to, supplierProfileId) {
   return result.rows;
 }
 
-function summary(deliveries, from, to) {
+function summary(deliveries, from, to, pricePerLitre = 0) {
   const first = deliveries[0];
+  const totalLitres = deliveries.reduce(
+    (sum, item) => sum + Number(item.quantity_litres),
+    0,
+  );
   return {
     from,
     to,
     supplier: first
       ? { name: first.full_name, code: first.supplier_code, email: first.email }
       : null,
-    totalLitres: deliveries.reduce(
-      (sum, item) => sum + Number(item.quantity_litres),
-      0,
-    ),
+    totalLitres,
     deliveryCount: deliveries.length,
-    deliveries,
+    pricePerLitre,
+    totalCost: round2(totalLitres * pricePerLitre),
+    deliveries: deliveries.map((item) => ({
+      ...item,
+      amount: round2(Number(item.quantity_litres) * pricePerLitre),
+    })),
   };
 }
 
@@ -146,8 +173,33 @@ function buildPdf(data) {
       .fontSize(20)
       .font("Helvetica-Bold")
       .text(String(data.deliveryCount), 234, 252);
+    // Total cost card
+    const costText = `KSh ${money(data.totalCost)}`;
+    doc
+      .roundedRect(394, 220, 155, 62, 8)
+      .fill("#e8f1e4")
+      .fillColor("#5a9960")
+      .fontSize(9)
+      .font("Helvetica")
+      .text("TOTAL COST", 408, 234)
+      .fillColor("#17372d")
+      .fontSize(costText.length > 14 ? 12 : 16)
+      .font("Helvetica-Bold")
+      .text(costText, 408, 248, { width: 130, lineBreak: false })
+      .fillColor("#829087")
+      .fontSize(8)
+      .font("Helvetica")
+      .text(
+        data.pricePerLitre > 0
+          ? `@ KSh ${money(data.pricePerLitre)} per litre`
+          : "Price per litre not set",
+        408,
+        268,
+        { width: 135, lineBreak: false },
+      );
+
     let y = 320;
-    const x = [46, 172, 280, 390];
+    const x = [46, 172, 280];
     doc
       .rect(46, y, 503, 26)
       .fill("#17372d")
@@ -157,7 +209,7 @@ function buildPdf(data) {
       .text("DATE", 54, y + 9)
       .text("SESSION", 180, y + 9)
       .text("QUANTITY", 288, y + 9)
-      .text("RECORDED", 398, y + 9);
+      .text("AMOUNT (KSh)", 380, y + 9, { width: 161, align: "right" });
     y += 26;
     data.deliveries.forEach((item, index) => {
       if (y > 745) {
@@ -177,9 +229,29 @@ function buildPdf(data) {
           y + 8,
         )
         .text(`${Number(item.quantity_litres).toFixed(2)} L`, x[2] + 8, y + 8)
-        .text("SuperLeo Dairy", x[3] + 8, y + 8);
+        .text(money(item.amount), 380, y + 8, { width: 161, align: "right" });
       y += 25;
     });
+
+    // Totals row
+    if (data.deliveries.length) {
+      if (y > 735) {
+        doc.addPage();
+        y = 54;
+      }
+      doc
+        .rect(46, y, 503, 28)
+        .fill("#17372d")
+        .fillColor("#ffffff")
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text("TOTAL", 54, y + 10)
+        .text(`${data.totalLitres.toFixed(2)} L`, x[2] + 8, y + 10)
+        .text(`KSh ${money(data.totalCost)}`, 380, y + 10, {
+          width: 161,
+          align: "right",
+        });
+    }
     doc
       .fillColor("#829087")
       .fontSize(8)
@@ -192,7 +264,8 @@ export async function report(req, res, next) {
   try {
     const { from, to } = range(req);
     const deliveries = await rows(from, to, req.query.supplierProfileId);
-    res.json({ data: summary(deliveries, from, to) });
+    const price = await getPricePerLitre();
+    res.json({ data: summary(deliveries, from, to, price) });
   } catch (error) {
     next(error);
   }
@@ -200,10 +273,12 @@ export async function report(req, res, next) {
 export async function pdf(req, res, next) {
   try {
     const { from, to } = range(req);
+    const price = await getPricePerLitre();
     const data = summary(
       await rows(from, to, req.query.supplierProfileId),
       from,
       to,
+      price,
     );
     const buffer = await buildPdf(data);
     res.set({
@@ -220,7 +295,13 @@ export async function email(req, res, next) {
     const { from, to, supplierEmail, supplierProfileId } = req.body;
     if (!supplierEmail)
       return res.status(400).json({ error: "supplierEmail is required" });
-    const data = summary(await rows(from, to, supplierProfileId), from, to);
+    const price = await getPricePerLitre();
+    const data = summary(
+      await rows(from, to, supplierProfileId),
+      from,
+      to,
+      price,
+    );
     const pdf = await buildPdf(data);
     const resend = new Resend(process.env.RESEND_API_KEY || "re_placeholder");
     const { error } = await resend.emails.send(
@@ -230,7 +311,7 @@ export async function email(req, res, next) {
           "SuperLeo Reports <reports@dairy.superleo.co.ke>",
         to: [supplierEmail],
         subject: `SuperLeo milk report · ${from} to ${to}`,
-        html: `<p>Hello ${data.supplier?.name || "Supplier"},</p><p>Please find your SuperLeo milk delivery report attached for ${displayDate(from)} to ${displayDate(to)}.</p><p>Regards,<br>SuperLeo Dairy Management</p>`,
+        html: `<p>Hello ${data.supplier?.name || "Supplier"},</p><p>Please find your SuperLeo milk delivery report attached for ${displayDate(from)} to ${displayDate(to)}.</p><p>Total supplied: ${data.totalLitres.toFixed(2)} L<br>Total cost: KSh ${money(data.totalCost)}</p><p>Regards,<br>SuperLeo Dairy Management</p>`,
         attachments: [
           {
             filename: `superleo-${data.supplier?.code || "dairy"}-${from}-to-${to}.pdf`,
