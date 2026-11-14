@@ -1,8 +1,16 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+import {
+  PHONE_INVALID_ERROR,
+  PHONE_REQUIRED_ERROR,
+  validPhone,
+} from "../utils/phone.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
+
+const httpError = (status, message) =>
+  Object.assign(new Error(message), { statusCode: status, status });
 
 function createToken(user) {
   if (!JWT_SECRET) throw new Error("JWT_SECRET is not configured");
@@ -20,6 +28,13 @@ export async function registerSupplier({
   phone,
   address,
 }) {
+  // A phone number is required, so managers can always find the supplier by it
+  const cleanPhone = String(phone ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!cleanPhone) throw httpError(400, PHONE_REQUIRED_ERROR);
+  if (!validPhone(cleanPhone)) throw httpError(400, PHONE_INVALID_ERROR);
+
   const passwordHash = await bcrypt.hash(password, 12);
   const client = await pool.connect();
   try {
@@ -32,7 +47,7 @@ export async function registerSupplier({
     const code = `SUP-${String(Date.now()).slice(-6)}`;
     const profileResult = await client.query(
       "INSERT INTO supplier_profiles (user_id, supplier_code, full_name, phone, address) VALUES ($1, $2, $3, $4, $5) RETURNING id, supplier_code, full_name, phone, address",
-      [user.id, code, fullName, phone || null, address || null],
+      [user.id, code, fullName, cleanPhone, address || null],
     );
     await client.query("COMMIT");
     return {
@@ -53,14 +68,14 @@ export async function login({ email, password }) {
     [email.toLowerCase()],
   );
   const user = result.rows[0];
-  if (
-    !user ||
-    !user.is_active ||
-    !(await bcrypt.compare(password, user.password_hash))
-  )
-    throw Object.assign(new Error("Invalid email or password"), {
-      statusCode: 401,
-    });
+  if (!user || !(await bcrypt.compare(password, user.password_hash)))
+    throw httpError(401, "Invalid email or password");
+  // Only someone who knows the password is told the account is deactivated
+  if (!user.is_active)
+    throw httpError(
+      403,
+      "This account has been deactivated. Please contact SuperLeo.",
+    );
   await pool.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [
     user.id,
   ]);

@@ -5,6 +5,34 @@ import { requireAuth, requireRoles } from "../middleware/auth.js";
 const router = Router();
 router.use(requireAuth, requireRoles("manager", "admin"));
 
+// "Active" lives on both the profile and the login: sign-in checks users.is_active,
+// the supplier lists check supplier_profiles.is_active. Keep them in step.
+async function setSupplierActive(id, isActive) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const profile = await client.query(
+      "UPDATE supplier_profiles SET is_active = $1, updated_at = NOW() WHERE id = $2 RETURNING id, is_active, user_id",
+      [isActive, id],
+    );
+    if (!profile.rowCount) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    await client.query(
+      "UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'supplier'",
+      [isActive, profile.rows[0].user_id],
+    );
+    await client.query("COMMIT");
+    return { id: profile.rows[0].id, is_active: profile.rows[0].is_active };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 // GET /admin/suppliers              -> active suppliers only (dashboard dropdown)
 // GET /admin/suppliers?include=all  -> active and inactive
 router.get("/suppliers", async (req, res, next) => {
@@ -37,10 +65,7 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, "\\$&");
 router.get("/suppliers/directory", async (req, res, next) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize, 10) || 20),
-    );
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
     const search = String(req.query.search || "").trim();
     const address = String(req.query.address || "").trim();
     const status = ["active", "inactive"].includes(req.query.status)
@@ -48,9 +73,7 @@ router.get("/suppliers/directory", async (req, res, next) => {
       : "all";
     const orderBy = DIRECTORY_SORTS[req.query.sort] || DIRECTORY_SORTS.name_asc;
     // "0712 345" and "0712345" should both find a phone number
-    const digits = /^[\d\s+\-()]+$/.test(search)
-      ? search.replace(/\D/g, "")
-      : "";
+    const digits = /^[\d\s+\-()]+$/.test(search) ? search.replace(/\D/g, "") : "";
 
     const filters = [
       escapeLike(search),
@@ -70,10 +93,7 @@ router.get("/suppliers/directory", async (req, res, next) => {
              OR ($4::text = 'inactive' AND sp.is_active = FALSE))`;
 
     const [count, list] = await Promise.all([
-      pool.query(
-        `SELECT COUNT(*)::int AS total FROM supplier_profiles sp ${where}`,
-        filters,
-      ),
+      pool.query(`SELECT COUNT(*)::int AS total FROM supplier_profiles sp ${where}`, filters),
       pool.query(
         `SELECT sp.id, sp.supplier_code, sp.full_name, sp.phone, sp.address, sp.is_active, sp.created_at,
                 u.email,
@@ -92,12 +112,7 @@ router.get("/suppliers/directory", async (req, res, next) => {
     const total = count.rows[0].total;
     res.json({
       data: list.rows,
-      meta: {
-        total,
-        page,
-        pageSize,
-        totalPages: Math.max(1, Math.ceil(total / pageSize)),
-      },
+      meta: { total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
     });
   } catch (error) {
     next(error);
@@ -201,13 +216,9 @@ router.patch("/suppliers/:id/status", async (req, res, next) => {
     const { isActive } = req.body;
     if (typeof isActive !== "boolean")
       return res.status(400).json({ error: "isActive must be true or false" });
-    const result = await pool.query(
-      "UPDATE supplier_profiles SET is_active = $1, updated_at = NOW() WHERE id = $2 RETURNING id, is_active",
-      [isActive, req.params.id],
-    );
-    if (!result.rowCount)
-      return res.status(404).json({ error: "Supplier not found" });
-    res.json({ data: result.rows[0] });
+    const row = await setSupplierActive(req.params.id, isActive);
+    if (!row) return res.status(404).json({ error: "Supplier not found" });
+    res.json({ data: row });
   } catch (error) {
     next(error);
   }
@@ -219,12 +230,8 @@ router.patch("/suppliers/:id/status", async (req, res, next) => {
 router.delete("/suppliers/:id", async (req, res, next) => {
   if (req.query.permanent !== "true") {
     try {
-      const result = await pool.query(
-        "UPDATE supplier_profiles SET is_active = FALSE, updated_at = NOW() WHERE id = $1 RETURNING id",
-        [req.params.id],
-      );
-      if (!result.rowCount)
-        return res.status(404).json({ error: "Supplier not found" });
+      const row = await setSupplierActive(req.params.id, false);
+      if (!row) return res.status(404).json({ error: "Supplier not found" });
       return res.json({ data: { deleted: true } });
     } catch (error) {
       return next(error);
