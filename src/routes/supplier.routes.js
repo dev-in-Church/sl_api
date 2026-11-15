@@ -31,7 +31,7 @@ router.use(async (req, res, next) => {
 router.get("/profile", async (req, res, next) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM supplier_profiles WHERE user_id = $1",
+      "SELECT id, user_id, supplier_code, full_name, phone, address, is_active, created_at, updated_at FROM supplier_profiles WHERE user_id = $1",
       [req.user.id],
     );
     res.json({ data: result.rows[0] });
@@ -57,7 +57,7 @@ router.patch("/profile", async (req, res, next) => {
       return res.status(400).json({ error: "That address is too long." });
 
     const result = await pool.query(
-      "UPDATE supplier_profiles SET full_name = $1, phone = $2, address = $3, updated_at = NOW() WHERE user_id = $4 RETURNING *",
+      "UPDATE supplier_profiles SET full_name = $1, phone = $2, address = $3, updated_at = NOW() WHERE user_id = $4 RETURNING id, user_id, supplier_code, full_name, phone, address, is_active, created_at, updated_at",
       [fullName, phone, address || null, req.user.id],
     );
     if (!result.rowCount)

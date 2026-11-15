@@ -5,6 +5,24 @@ import { requireAuth, requireRoles } from "../middleware/auth.js";
 const router = Router();
 router.use(requireAuth, requireRoles("manager", "admin"));
 
+// Default price per litre: KSh 65 unless it was changed on the dashboard.
+// A supplier can have their own price (supplier_profiles.price_per_litre);
+// NULL means "use the default".
+const DEFAULT_PRICE_PER_LITRE = 65;
+async function readDefaultPrice() {
+  try {
+    const result = await pool.query(
+      "SELECT value FROM app_settings WHERE key = 'price_per_litre'",
+    );
+    if (!result.rowCount) return DEFAULT_PRICE_PER_LITRE;
+    const price = Number(result.rows[0].value);
+    return Number.isFinite(price) ? price : DEFAULT_PRICE_PER_LITRE;
+  } catch (error) {
+    if (error.code === "42P01") return DEFAULT_PRICE_PER_LITRE;
+    throw error;
+  }
+}
+
 // "Active" lives on both the profile and the login: sign-in checks users.is_active,
 // the supplier lists check supplier_profiles.is_active. Keep them in step.
 async function setSupplierActive(id, isActive) {
@@ -65,7 +83,10 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, "\\$&");
 router.get("/suppliers/directory", async (req, res, next) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
+    const pageSize = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.pageSize, 10) || 20),
+    );
     const search = String(req.query.search || "").trim();
     const address = String(req.query.address || "").trim();
     const status = ["active", "inactive"].includes(req.query.status)
@@ -73,7 +94,9 @@ router.get("/suppliers/directory", async (req, res, next) => {
       : "all";
     const orderBy = DIRECTORY_SORTS[req.query.sort] || DIRECTORY_SORTS.name_asc;
     // "0712 345" and "0712345" should both find a phone number
-    const digits = /^[\d\s+\-()]+$/.test(search) ? search.replace(/\D/g, "") : "";
+    const digits = /^[\d\s+\-()]+$/.test(search)
+      ? search.replace(/\D/g, "")
+      : "";
 
     const filters = [
       escapeLike(search),
@@ -93,9 +116,12 @@ router.get("/suppliers/directory", async (req, res, next) => {
              OR ($4::text = 'inactive' AND sp.is_active = FALSE))`;
 
     const [count, list] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS total FROM supplier_profiles sp ${where}`, filters),
       pool.query(
-        `SELECT sp.id, sp.supplier_code, sp.full_name, sp.phone, sp.address, sp.is_active, sp.created_at,
+        `SELECT COUNT(*)::int AS total FROM supplier_profiles sp ${where}`,
+        filters,
+      ),
+      pool.query(
+        `SELECT sp.id, sp.supplier_code, sp.full_name, sp.phone, sp.address, sp.is_active, sp.created_at, sp.price_per_litre,
                 u.email,
                 COUNT(md.id)::int AS records_count,
                 COALESCE(SUM(md.quantity_litres), 0)::numeric AS total_litres
@@ -110,9 +136,20 @@ router.get("/suppliers/directory", async (req, res, next) => {
       ),
     ]);
     const total = count.rows[0].total;
+    const defaultPrice = await readDefaultPrice();
     res.json({
-      data: list.rows,
-      meta: { total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+      // the raw price stays on the server; the page only needs to know if it is custom
+      data: list.rows.map(({ price_per_litre, ...row }) => ({
+        ...row,
+        custom_price:
+          price_per_litre != null && Number(price_per_litre) !== defaultPrice,
+      })),
+      meta: {
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
     });
   } catch (error) {
     next(error);
@@ -147,7 +184,19 @@ router.get("/suppliers/:id", async (req, res, next) => {
     );
     if (!result.rowCount)
       return res.status(404).json({ error: "Supplier not found" });
-    res.json({ data: result.rows[0] });
+    const row = result.rows[0];
+    const defaultPrice = await readDefaultPrice();
+    const own =
+      row.price_per_litre == null ? null : Number(row.price_per_litre);
+    res.json({
+      data: {
+        ...row,
+        default_price: defaultPrice,
+        effective_price: own ?? defaultPrice,
+        // "custom" only when the supplier's rate really differs from the default
+        custom_price: own !== null && own !== defaultPrice,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -167,10 +216,7 @@ router.get("/overview", async (req, res, next) => {
 // Price per litre (used by the dashboard and by reports)
 router.get("/settings/price", async (req, res, next) => {
   try {
-    const result = await pool.query(
-      "SELECT value FROM app_settings WHERE key = 'price_per_litre'",
-    );
-    res.json({ data: { pricePerLitre: Number(result.rows[0]?.value) || 0 } });
+    res.json({ data: { pricePerLitre: await readDefaultPrice() } });
   } catch (error) {
     next(error);
   }
@@ -205,6 +251,40 @@ router.patch("/suppliers/:id", async (req, res, next) => {
     if (!result.rowCount)
       return res.status(404).json({ error: "Supplier not found" });
     res.json({ data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /admin/suppliers/:id/price   body: { "pricePerLitre": 70 }  or  { "pricePerLitre": null }
+// null (or a price equal to the default) puts the supplier back on the default price.
+router.put("/suppliers/:id/price", async (req, res, next) => {
+  try {
+    const raw = req.body.pricePerLitre;
+    const defaultPrice = await readDefaultPrice();
+    let stored = null;
+    if (raw !== null && raw !== undefined && raw !== "") {
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0 || value > 1000000)
+        return res
+          .status(400)
+          .json({ error: "Enter a valid price per litre (0 or more)." });
+      const rounded = Math.round(value * 100) / 100;
+      stored = rounded === defaultPrice ? null : rounded;
+    }
+    const result = await pool.query(
+      "UPDATE supplier_profiles SET price_per_litre = $1, updated_at = NOW() WHERE id = $2 RETURNING id",
+      [stored, req.params.id],
+    );
+    if (!result.rowCount)
+      return res.status(404).json({ error: "Supplier not found" });
+    res.json({
+      data: {
+        default_price: defaultPrice,
+        effective_price: stored ?? defaultPrice,
+        custom_price: stored !== null,
+      },
+    });
   } catch (error) {
     next(error);
   }

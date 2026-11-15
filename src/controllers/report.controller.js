@@ -20,16 +20,19 @@ const money = (n) =>
     maximumFractionDigits: 2,
   });
 
-// Current price per litre, set from the manager dashboard (app_settings table).
-// Returns 0 if it has not been set yet.
+// Default price per litre (KSh 65 unless changed on the manager dashboard).
+// A supplier can have their own price on supplier_profiles.price_per_litre.
+const DEFAULT_PRICE_PER_LITRE = 65;
 async function getPricePerLitre() {
   try {
     const result = await pool.query(
       "SELECT value FROM app_settings WHERE key = 'price_per_litre'",
     );
-    return Number(result.rows[0]?.value) || 0;
+    if (!result.rowCount) return DEFAULT_PRICE_PER_LITRE;
+    const price = Number(result.rows[0].value);
+    return Number.isFinite(price) ? price : DEFAULT_PRICE_PER_LITRE;
   } catch (error) {
-    if (error.code === "42P01") return 0; // table not created yet
+    if (error.code === "42P01") return DEFAULT_PRICE_PER_LITRE; // table not created yet
     throw error;
   }
 }
@@ -59,32 +62,39 @@ function displayDate(value) {
 
 async function rows(from, to, supplierProfileId) {
   const result = await pool.query(
-    `SELECT md.id, md.quantity_litres, cs.session_date, cs.session_type, sp.supplier_code, sp.full_name, u.email FROM milk_deliveries md JOIN collection_sessions cs ON cs.id = md.session_id JOIN supplier_profiles sp ON sp.id = md.supplier_profile_id JOIN users u ON u.id = sp.user_id WHERE cs.session_date BETWEEN $1 AND $2 AND ($3::uuid IS NULL OR sp.id = $3) ORDER BY cs.session_date DESC`,
+    `SELECT md.id, md.quantity_litres, cs.session_date, cs.session_type, sp.supplier_code, sp.full_name, sp.price_per_litre AS supplier_price, u.email FROM milk_deliveries md JOIN collection_sessions cs ON cs.id = md.session_id JOIN supplier_profiles sp ON sp.id = md.supplier_profile_id JOIN users u ON u.id = sp.user_id WHERE cs.session_date BETWEEN $1 AND $2 AND ($3::uuid IS NULL OR sp.id = $3) ORDER BY cs.session_date DESC`,
     [from, to, supplierProfileId || null],
   );
   return result.rows;
 }
 
-function summary(deliveries, from, to, pricePerLitre = 0) {
+function summary(deliveries, from, to, defaultPrice = DEFAULT_PRICE_PER_LITRE) {
   const first = deliveries[0];
-  const totalLitres = deliveries.reduce(
-    (sum, item) => sum + Number(item.quantity_litres),
-    0,
-  );
+  // Each record is priced at its supplier's own rate, or the default rate
+  const priced = deliveries.map(({ supplier_price, ...item }) => {
+    const price = supplier_price != null ? Number(supplier_price) : defaultPrice;
+    return {
+      ...item,
+      price_per_litre: price,
+      amount: round2(Number(item.quantity_litres) * price),
+    };
+  });
+  const rates = new Set(priced.map((item) => item.price_per_litre));
   return {
     from,
     to,
     supplier: first
       ? { name: first.full_name, code: first.supplier_code, email: first.email }
       : null,
-    totalLitres,
-    deliveryCount: deliveries.length,
-    pricePerLitre,
-    totalCost: round2(totalLitres * pricePerLitre),
-    deliveries: deliveries.map((item) => ({
-      ...item,
-      amount: round2(Number(item.quantity_litres) * pricePerLitre),
-    })),
+    totalLitres: priced.reduce(
+      (sum, item) => sum + Number(item.quantity_litres),
+      0,
+    ),
+    deliveryCount: priced.length,
+    // null when a report mixes suppliers with different rates
+    pricePerLitre: rates.size === 0 ? defaultPrice : rates.size === 1 ? [...rates][0] : null,
+    totalCost: round2(priced.reduce((sum, item) => sum + item.amount, 0)),
+    deliveries: priced,
   };
 }
 
@@ -146,7 +156,7 @@ function buildPdf(data) {
       .fontSize(10)
       .font("Helvetica")
       .text(
-        `Reporting period: ${displayDate(data.from)} - ${displayDate(data.to)}`,
+        `Reporting period: ${displayDate(data.from)} — ${displayDate(data.to)}`,
         64,
         186,
       );
@@ -190,9 +200,11 @@ function buildPdf(data) {
       .fontSize(8)
       .font("Helvetica")
       .text(
-        data.pricePerLitre > 0
-          ? `@ KSh ${money(data.pricePerLitre)} per litre`
-          : "Price per litre not set",
+        data.pricePerLitre === null
+          ? "Rates vary by supplier"
+          : data.pricePerLitre > 0
+            ? `@ KSh ${money(data.pricePerLitre)} per litre`
+            : "Price per litre not set",
         408,
         268,
         { width: 135, lineBreak: false },
@@ -319,9 +331,7 @@ export async function email(req, res, next) {
           },
         ],
       },
-      {
-        idempotencyKey: `supplier-report/${supplierProfileId || supplierEmail}/${randomUUID()}`,
-      },
+      { idempotencyKey: `supplier-report/${supplierProfileId || supplierEmail}/${randomUUID()}` },
     );
     if (error) return res.status(502).json({ error: error.message });
     res.json({ data: { sent: true } });

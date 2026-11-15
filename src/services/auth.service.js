@@ -83,7 +83,7 @@ export async function login({ email, password }) {
     user.role === "supplier"
       ? (
           await pool.query(
-            "SELECT * FROM supplier_profiles WHERE user_id = $1",
+            "SELECT id, user_id, supplier_code, full_name, phone, address, is_active, created_at, updated_at FROM supplier_profiles WHERE user_id = $1",
             [user.id],
           )
         ).rows[0]
