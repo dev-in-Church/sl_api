@@ -62,7 +62,7 @@ function displayDate(value) {
 
 async function rows(from, to, supplierProfileId) {
   const result = await pool.query(
-    `SELECT md.id, md.quantity_litres, cs.session_date, cs.session_type, sp.supplier_code, sp.full_name, sp.price_per_litre AS supplier_price, u.email FROM milk_deliveries md JOIN collection_sessions cs ON cs.id = md.session_id JOIN supplier_profiles sp ON sp.id = md.supplier_profile_id JOIN users u ON u.id = sp.user_id WHERE cs.session_date BETWEEN $1 AND $2 AND ($3::uuid IS NULL OR sp.id = $3) ORDER BY cs.session_date DESC`,
+    `SELECT md.id, md.quantity_litres, cs.session_date, cs.session_type, sp.supplier_code, sp.full_name, sp.price_per_litre AS supplier_price, md.price_per_litre AS delivery_price, u.email FROM milk_deliveries md JOIN collection_sessions cs ON cs.id = md.session_id JOIN supplier_profiles sp ON sp.id = md.supplier_profile_id JOIN users u ON u.id = sp.user_id WHERE cs.session_date BETWEEN $1 AND $2 AND ($3::uuid IS NULL OR sp.id = $3) ORDER BY cs.session_date DESC`,
     [from, to, supplierProfileId || null],
   );
   return result.rows;
@@ -71,8 +71,14 @@ async function rows(from, to, supplierProfileId) {
 function summary(deliveries, from, to, defaultPrice = DEFAULT_PRICE_PER_LITRE) {
   const first = deliveries[0];
   // Each record is priced at its supplier's own rate, or the default rate
-  const priced = deliveries.map(({ supplier_price, ...item }) => {
-    const price = supplier_price != null ? Number(supplier_price) : defaultPrice;
+  const priced = deliveries.map(({ supplier_price, delivery_price, ...item }) => {
+    // the rate locked when the milk was delivered, else the supplier's / default rate
+    const price =
+      delivery_price != null
+        ? Number(delivery_price)
+        : supplier_price != null
+          ? Number(supplier_price)
+          : defaultPrice;
     return {
       ...item,
       price_per_litre: price,
