@@ -71,20 +71,22 @@ async function rows(from, to, supplierProfileId) {
 function summary(deliveries, from, to, defaultPrice = DEFAULT_PRICE_PER_LITRE) {
   const first = deliveries[0];
   // Each record is priced at its supplier's own rate, or the default rate
-  const priced = deliveries.map(({ supplier_price, delivery_price, ...item }) => {
-    // the rate locked when the milk was delivered, else the supplier's / default rate
-    const price =
-      delivery_price != null
-        ? Number(delivery_price)
-        : supplier_price != null
-          ? Number(supplier_price)
-          : defaultPrice;
-    return {
-      ...item,
-      price_per_litre: price,
-      amount: round2(Number(item.quantity_litres) * price),
-    };
-  });
+  const priced = deliveries.map(
+    ({ supplier_price, delivery_price, ...item }) => {
+      // the rate locked when the milk was delivered, else the supplier's / default rate
+      const price =
+        delivery_price != null
+          ? Number(delivery_price)
+          : supplier_price != null
+            ? Number(supplier_price)
+            : defaultPrice;
+      return {
+        ...item,
+        price_per_litre: price,
+        amount: round2(Number(item.quantity_litres) * price),
+      };
+    },
+  );
   const rates = new Set(priced.map((item) => item.price_per_litre));
   return {
     from,
@@ -98,7 +100,8 @@ function summary(deliveries, from, to, defaultPrice = DEFAULT_PRICE_PER_LITRE) {
     ),
     deliveryCount: priced.length,
     // null when a report mixes suppliers with different rates
-    pricePerLitre: rates.size === 0 ? defaultPrice : rates.size === 1 ? [...rates][0] : null,
+    pricePerLitre:
+      rates.size === 0 ? defaultPrice : rates.size === 1 ? [...rates][0] : null,
     totalCost: round2(priced.reduce((sum, item) => sum + item.amount, 0)),
     deliveries: priced,
   };
@@ -162,7 +165,7 @@ function buildPdf(data) {
       .fontSize(10)
       .font("Helvetica")
       .text(
-        `Reporting period: ${displayDate(data.from)} — ${displayDate(data.to)}`,
+        `Reporting period: ${displayDate(data.from)} - ${displayDate(data.to)}`,
         64,
         186,
       );
@@ -337,10 +340,51 @@ export async function email(req, res, next) {
           },
         ],
       },
-      { idempotencyKey: `supplier-report/${supplierProfileId || supplierEmail}/${randomUUID()}` },
+      {
+        idempotencyKey: `supplier-report/${supplierProfileId || supplierEmail}/${randomUUID()}`,
+      },
     );
     if (error) return res.status(502).json({ error: error.message });
     res.json({ data: { sent: true } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// GET /suppliers/reports/monthly?month=YYYY-MM
+// A supplier downloads their own statement for one month (the supplier is taken from the
+// login, never from the request, so nobody can fetch someone else's).
+export async function supplierMonthlyPdf(req, res, next) {
+  try {
+    const month = String(req.query.month || "");
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))
+      return res
+        .status(400)
+        .json({ error: "Choose a month, for example 2026-11." });
+    const [year, monthNumber] = month.split("-").map(Number);
+    const from = `${month}-01`;
+    const to = `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, "0")}`;
+
+    const profile = await pool.query(
+      "SELECT id FROM supplier_profiles WHERE user_id = $1",
+      [req.user.id],
+    );
+    if (!profile.rowCount)
+      return res.status(404).json({ error: "Supplier profile not found" });
+
+    const price = await getPricePerLitre();
+    const data = summary(
+      await rows(from, to, profile.rows[0].id),
+      from,
+      to,
+      price,
+    );
+    const buffer = await buildPdf(data);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="superleo-${data.supplier?.code || "statement"}-${month}.pdf"`,
+    });
+    res.send(buffer);
   } catch (error) {
     next(error);
   }
